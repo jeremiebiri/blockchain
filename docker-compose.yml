@@ -1,0 +1,25 @@
+# docker-compose.yml
+version: '3.8'
+
+services:
+  node1:
+    build: .
+    command: python node1.py
+    ports:
+      - "5001:5001" # Host_port:Container_port
+    networks:
+      - consortium_network
+
+  node2:
+    build: .
+    command: python node2.py
+    ports:
+      - "5002:5002"
+    networks:
+      - consortium_network
+    depends_on:
+      - node1 # Ensures node1 starts before node2, though not strictly necessary for this simple ping
+
+networks:
+  consortium_network:
+    driver: bridge
