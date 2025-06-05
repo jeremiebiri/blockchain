@@ -1,6 +1,7 @@
 # blockchain_core.py
 import time
 import json
+import base64 # For a more "realistic" simulated encryption output
 
 # --- Part 1: Basic Cryptographic Primitives (Simulated/Simplified) ---
 def simple_hash(data):
@@ -14,8 +15,12 @@ def simple_hash(data):
     elif isinstance(data, list):
         # Sort lists of dicts for consistent hashing if elements are dicts
         # Sort by a stable key for consistent order. Assuming 'timestamp' and 'sender' exist.
-        if all(isinstance(item, dict) for item in data) and len(data) > 0 and 'timestamp' in data[0] and 'sender' in data[0]:
-            data_str = json.dumps(sorted(data, key=lambda x: (x['timestamp'], x['sender'], json.dumps(x, sort_keys=True))))
+        if all(isinstance(item, dict) for item in data) and len(data) > 0:
+            # Try to sort by common keys, fall back to full JSON dump if keys aren't present
+            try:
+                data_str = json.dumps(sorted(data, key=lambda x: (x.get('timestamp', 0), x.get('sender', ''), json.dumps(x, sort_keys=True))))
+            except TypeError: # Fallback if items are not consistently structured for sorting
+                data_str = json.dumps(data)
         else:
             data_str = json.dumps(data)
     else:
@@ -26,16 +31,68 @@ def simple_hash(data):
         hash_value = (hash_value * 31 + ord(char)) % (2**32 - 1)
     return str(hash_value)
 
+# --- Simulated Encryption/Decryption Functions ---
+# In a real system, this would involve actual cryptographic libraries (e.g., PyCryptodome)
+# and a robust key management system (e.g., KMS, hardware security modules).
+
+def simulate_encrypt(data, encryption_key):
+    """
+    Simulates encrypting data.
+    In a real scenario, `encryption_key` would be a proper cryptographic key
+    and the process would use a strong encryption algorithm (AES, RSA, etc.).
+    For this demo, we just encode and prepend a marker.
+    """
+    if not isinstance(data, str):
+        data = json.dumps(data) # Convert dicts/lists to string for encryption
+    
+    # A very simple "encryption"
+    encrypted_bytes = base64.b64encode(data.encode('utf-8'))
+    return f"ENC:{encryption_key}:{encrypted_bytes.decode('utf-8')}"
+
+def simulate_decrypt(encrypted_data, decryption_key):
+    """
+    Simulates decrypting data.
+    Checks if the decryption key matches the one used for "encryption".
+    """
+    if not encrypted_data.startswith("ENC:"):
+        # Not an encrypted string from our simulation
+        return encrypted_data # Or raise an error
+
+    parts = encrypted_data.split(':', 2) # Split into 'ENC', 'key', 'base64_data'
+    if len(parts) < 3:
+        print("Error: Malformed simulated encrypted data string.")
+        return None
+
+    stored_key = parts[1]
+    base64_encoded_data = parts[2]
+
+    if stored_key != decryption_key:
+        print(f"Decryption failed: Provided key '{decryption_key}' does not match stored key '{stored_key}'.")
+        return None
+    
+    try:
+        decoded_bytes = base64.b64decode(base64_encoded_data.encode('utf-8'))
+        # Assuming original data was JSON, try to decode it back
+        try:
+            return json.loads(decoded_bytes.decode('utf-8'))
+        except json.JSONDecodeError:
+            return decoded_bytes.decode('utf-8') # Return as string if not JSON
+    except Exception as e:
+        print(f"Error during simulated decryption: {e}")
+        return None
+
+
 # --- Part 2: Transaction ---
 
 class Transaction:
-    def __init__(self, sender, recipient, amount, timestamp=None, data=None):
+    def __init__(self, sender, recipient, amount, timestamp=None, data=None, is_encrypted=False):
         self.sender = sender
         self.recipient = recipient
         self.amount = amount
         self.timestamp = timestamp if timestamp is not None else time.time()
         self.data = data if data is not None else {}
         self.signature = None
+        self.is_encrypted = is_encrypted # New: Flag for encrypted data
 
     def to_dict(self):
         """Converts transaction data to a dictionary for hashing/serialization."""
@@ -44,13 +101,21 @@ class Transaction:
             'recipient': self.recipient,
             'amount': self.amount,
             'timestamp': self.timestamp,
-            'data': self.data
+            'data': self.data,
+            'is_encrypted': self.is_encrypted # Include new flag
         }
 
     @classmethod
     def from_dict(cls, data_dict):
         """Creates a Transaction object from a dictionary."""
-        tx = cls(data_dict['sender'], data_dict['recipient'], data_dict['amount'], data_dict['timestamp'], data_dict['data'])
+        tx = cls(
+            data_dict['sender'],
+            data_dict['recipient'],
+            data_dict['amount'],
+            data_dict['timestamp'],
+            data_dict.get('data', {}), # Use .get with default for backward compatibility
+            data_dict.get('is_encrypted', False) # Use .get with default
+        )
         tx.signature = data_dict.get('signature')
         return tx
 
@@ -84,10 +149,11 @@ class Transaction:
 # --- Part 3: Block ---
 
 class Block:
-    def __init__(self, index, transactions, previous_hash, timestamp=None, nonce=0):
+    def __init__(self, index, transactions, previous_hash, miner, timestamp=None, nonce=0): # New: miner attribute
         self.index = index
         self.transactions = transactions # List of Transaction objects
         self.previous_hash = previous_hash
+        self.miner = miner # New: Node ID of the miner/validator
         self.timestamp = timestamp if timestamp is not None else time.time()
         self.nonce = nonce
         self.current_hash = self.calculate_hash() # Calculate hash upon creation
@@ -100,6 +166,7 @@ class Block:
             'index': self.index,
             'transactions': transaction_dicts,
             'previous_hash': self.previous_hash,
+            'miner': self.miner, # Include new attribute
             'timestamp': self.timestamp,
             'nonce': self.nonce
         }
@@ -108,7 +175,14 @@ class Block:
     def from_dict(cls, data_dict):
         """Creates a Block object from a dictionary."""
         transactions = [Transaction.from_dict(tx_data) for tx_data in data_dict['transactions']]
-        block = cls(data_dict['index'], transactions, data_dict['previous_hash'], data_dict['timestamp'], data_dict['nonce'])
+        block = cls(
+            data_dict['index'],
+            transactions,
+            data_dict['previous_hash'],
+            data_dict['miner'], # Pass new attribute
+            data_dict['timestamp'],
+            data_dict['nonce']
+        )
         block.current_hash = data_dict['current_hash'] # Ensure hash is set from the received data
         return block
 
@@ -119,7 +193,8 @@ class Block:
         # Sort transactions for consistent hashing (important for consensus)
         # Ensure sorting on multiple keys for stable order if timestamps are identical
         if 'transactions' in temp_dict and all(isinstance(item, dict) for item in temp_dict['transactions']):
-            temp_dict['transactions'] = sorted(temp_dict['transactions'], key=lambda x: (x['timestamp'], x['sender'], json.dumps(x, sort_keys=True)))
+            # Use 'timestamp' and 'sender' for consistent transaction ordering in block hash
+            temp_dict['transactions'] = sorted(temp_dict['transactions'], key=lambda x: (x.get('timestamp',0), x.get('sender',''), json.dumps(x, sort_keys=True)))
         return simple_hash(temp_dict)
 
 
@@ -130,12 +205,14 @@ class Blockchain:
         self.chain = []
         self.pending_transactions = []
         self.participating_organizations = {} # { "OrgName": "PublicKey" }
-        self.policies = {} # New: For "Board of Government" policies
+        self.policies = {} # For "Board of Government" policies
+        self.authorized_miners = set() # New: Set of node IDs authorized to mine
         self.create_genesis_block()
 
     def create_genesis_block(self):
         """Creates the first block in the chain."""
-        genesis_block = Block(0, [], "0")
+        # For genesis block, miner can be a special "system" or "initial" entity
+        genesis_block = Block(0, [], "0", miner="System")
         self.chain.append(genesis_block)
         print("Genesis block created.")
 
@@ -143,6 +220,18 @@ class Blockchain:
     def last_block(self):
         """Returns the last block in the chain."""
         return self.chain[-1]
+
+    def is_miner_authorized(self, miner_address):
+        """Checks if a given address is authorized to mine blocks."""
+        return miner_address in self.authorized_miners
+
+    def add_authorized_miner(self, miner_address):
+        """Adds an organization to the list of authorized miners."""
+        if miner_address not in self.authorized_miners:
+            self.authorized_miners.add(miner_address)
+            print(f"Miner '{miner_address}' added to authorized list.")
+        else:
+            print(f"Miner '{miner_address}' is already authorized.")
 
     def add_transaction(self, transaction):
         """Adds a new transaction to the list of pending transactions after validation."""
@@ -159,22 +248,35 @@ class Blockchain:
                 print(f"Policy Violation: Sender '{transaction.sender}' is not a registered organization.")
                 return False
         
-        # You can add more complex policy checks here based on transaction.data
-        # Example: check if 'ventilator_log' transaction contains 'patient_id'
+        # Policy: Check if 'ventilator_log' transaction contains 'patient_id' and 'duration_hrs'
         if transaction.data.get('type') == 'ventilator_log':
             if not transaction.data.get('patient_id') or not transaction.data.get('duration_hrs'):
                 print("Policy Violation: Ventilator log missing required data (patient_id or duration_hrs).")
                 return False
+            # If data is encrypted, we don't try to parse its internal structure here
+            if not transaction.is_encrypted and not isinstance(transaction.data.get('duration_hrs'), (int, float)):
+                print("Policy Violation: Ventilator log duration_hrs must be a number if not encrypted.")
+                return False
+            # Check min duration policy (only if not encrypted)
+            if not transaction.is_encrypted and transaction.data.get('duration_hrs') < self.policies.get('min_ventilator_duration_hrs', 0):
+                 print(f"Policy Violation: Ventilator duration {transaction.data.get('duration_hrs')} hrs is below minimum required {self.policies.get('min_ventilator_duration_hrs', 0)} hrs.")
+                 return False
 
         self.pending_transactions.append(transaction)
-        print(f"Transaction added to pending: {transaction.sender} -> {transaction.recipient}, Amount: {transaction.amount}, Data: {transaction.data.get('type')}")
+        data_display = "Encrypted" if transaction.is_encrypted else transaction.data.get('type', 'No Type')
+        print(f"Transaction added to pending: {transaction.sender} -> {transaction.recipient}, Amount: {transaction.amount}, Data Type: {data_display}")
         return True
 
     def create_block(self, miner_address):
         """
         Creates a new block with pending transactions.
         This is the step before it's validated and added to the chain by consensus.
+        Requires the miner to be authorized.
         """
+        if not self.is_miner_authorized(miner_address):
+            print(f"Error: Miner '{miner_address}' is not authorized to create blocks.")
+            return None
+
         if not self.pending_transactions:
             print("No pending transactions to create a block.")
             return None
@@ -186,19 +288,25 @@ class Blockchain:
             index=len(self.chain),
             transactions=sorted_transactions,
             previous_hash=self.last_block.current_hash,
+            miner=miner_address, # Set the miner of the block
             timestamp=time.time()
         )
         # Clear pending transactions AFTER block creation for this node
         # In a real system, pending transactions might be removed from all nodes
         # upon successful block propagation and validation.
         self.pending_transactions = []
-        print(f"Block #{new_block.index} created by {miner_address} with {len(new_block.transactions)} transactions. Hash: {new_block.current_hash}")
+        print(f"Block #{new_block.index} created by authorized miner '{miner_address}' with {len(new_block.transactions)} transactions. Hash: {new_block.current_hash}")
         return new_block
 
     def add_block(self, block):
         """Adds a new, validated block to the chain."""
         if not isinstance(block, Block):
             print("Error: Provided object is not a Block instance.")
+            return False
+
+        # --- PoA Consensus Check: Is the miner authorized? ---
+        if not self.is_miner_authorized(block.miner):
+            print(f"Validation Error: Block {block.index} was mined by unauthorized miner '{block.miner}'.")
             return False
 
         # Basic validation: ensure it links correctly and its hash is correct
@@ -218,7 +326,7 @@ class Blockchain:
         included_tx_hashes = {tx.calculate_hash() for tx in block.transactions}
         self.pending_transactions = [tx for tx in self.pending_transactions if tx.calculate_hash() not in included_tx_hashes]
 
-        print(f"Block #{block.index} successfully added to the chain and pending transactions updated.")
+        print(f"Block #{block.index} successfully added to the chain by '{block.miner}' and pending transactions updated.")
         return True
 
     def is_chain_valid(self):
@@ -226,6 +334,11 @@ class Blockchain:
         for i in range(1, len(self.chain)):
             current_block = self.chain[i]
             previous_block = self.chain[i-1]
+
+            # --- PoA Consensus Check: Is the block's miner authorized? ---
+            if not self.is_miner_authorized(current_block.miner):
+                print(f"Validation Error: Chain contains block {current_block.index} mined by unauthorized miner '{current_block.miner}'.")
+                return False
 
             # Check if the block's hash is correct (recalculate and compare)
             if current_block.calculate_hash() != current_block.current_hash:
@@ -301,3 +414,4 @@ class Blockchain:
         """Sets a network policy from the Board of Government."""
         self.policies[policy_name] = value
         print(f"Policy '{policy_name}' set to '{value}'.")
+
