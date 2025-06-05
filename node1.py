@@ -4,31 +4,40 @@ import json
 import threading
 import time
 import urllib.request
-import urllib.error # Import for catching HTTP errors
+import urllib.error
 
-# Import the core blockchain logic
-from blockchain_core import Blockchain, Transaction, Block, simple_hash
+# Import the core blockchain logic and new encryption functions
+from blockchain_core import Blockchain, Transaction, Block, simple_hash, simulate_encrypt, simulate_decrypt
 
 HOST_NAME = '0.0.0.0'
-NODE_PORT = 5001 # Changed from NODE1_PORT for generality
-NODE_ID = "Hospital_1" # This node's unique identifier and public key
+NODE_PORT = 5001
+NODE_ID = "Hospital_1"
 NODE_PRIVATE_KEY = "Hospital_1_private_key" # Simplified private key
+# Define a key for simulating encryption/decryption for this node's use
+NODE_ENCRYPTION_KEY = "Hospital_1_ENC_Key"
 
 # List of known peers (other nodes' addresses)
-# In Docker, use service names for inter-container communication
 PEERS = [
     {'id': 'Hospital_2', 'address': 'http://node2:5002'}
-    # Add more hospitals here if needed, e.g., {'id': 'Hospital_3', 'address': 'http://node3:5003'}
 ]
 
 # Initialize the blockchain for this node
 node_blockchain = Blockchain()
 node_blockchain.register_organization(NODE_ID, NODE_ID) # Register itself
 
+# --- PoA: Define Authorized Miners ---
+# For this demo, both Hospital_1 and Hospital_2 are authorized miners.
+# In a real consortium, this list would be carefully managed and potentially
+# stored on-chain or through a separate secure registry.
+node_blockchain.add_authorized_miner(NODE_ID) # Authorize itself
+# Add other authorized miners. For this simple setup, we'll assume both are authorized.
+# A more robust system might fetch this list from a trusted source or initial config.
+for peer in PEERS:
+    node_blockchain.add_authorized_miner(peer['id'])
+
+
 # CONCEPTUAL: Board of Government's special node
-# In a real setup, this might be a separate dedicated service or a special role
-# assigned to one or more of the existing hospital nodes.
-# For demo, we'll let Hospital_1 act as the policy setter.
+# Hospital_1 acts as the policy setter.
 if NODE_ID == "Hospital_1":
     node_blockchain.set_policy('restrict_sender_to_registered_orgs', True)
     node_blockchain.set_policy('min_ventilator_duration_hrs', 1)
@@ -43,15 +52,12 @@ class NodeCommunication:
         data = json.dumps(payload).encode('utf-8')
         req = urllib.request.Request(url, data=data, headers={'Content-Type': 'application/json'})
         try:
-            with urllib.request.urlopen(req, timeout=5) as response: # Added timeout
+            with urllib.request.urlopen(req, timeout=5) as response:
                 return json.loads(response.read().decode('utf-8'))
         except urllib.error.URLError as e:
-            # print(f"  Network error communicating with {url}: {e.reason}") # More specific error
             raise ConnectionError(f"Failed to connect to {url}: {e.reason}") from e
         except Exception as e:
-            # print(f"  Error sending POST to {url}: {e}")
             raise RuntimeError(f"Unexpected error sending POST to {url}: {e}") from e
-
 
     @staticmethod
     def broadcast_transaction(transaction):
@@ -103,8 +109,7 @@ class NodeCommunication:
         """
         Consensus algorithm: Our simplified version for consortium.
         If a longer valid chain exists, replace ours.
-        This is a basic longest-chain rule. In a real consortium,
-        it would be a more robust voting/PBFT-like mechanism.
+        This is a basic longest-chain rule, now incorporating PoA validation.
         """
         longest_chain_data = None
         max_length = len(current_blockchain.chain)
@@ -116,17 +121,20 @@ class NodeCommunication:
 
             if chain_response and 'chain' in chain_response and chain_response['length'] > max_length:
                 print(f"  {peer['id']} has a longer chain (length {chain_response['length']}). Validating...")
+                
                 # Temporarily create a dummy blockchain to validate the candidate chain
-                # This avoids corrupting the current_blockchain if the candidate is invalid.
                 temp_blockchain_for_validation = Blockchain()
                 temp_blockchain_for_validation.chain = [] # Clear its genesis block
-
+                
+                # IMPORTANT: Transfer authorized_miners for validation consistency
+                temp_blockchain_for_validation.authorized_miners = set(current_blockchain.authorized_miners)
+                
                 if temp_blockchain_for_validation.replace_chain(chain_response['chain']): # replace_chain method includes is_chain_valid
                     max_length = chain_response['length']
                     longest_chain_data = chain_response['chain']
                     print(f"  Longer valid chain found from {peer['id']}.")
                 else:
-                    print(f"  Chain from {peer['id']} is longer but not valid.")
+                    print(f"  Chain from {peer['id']} is longer but not valid (e.g., unauthorized miner).")
 
         if longest_chain_data:
             print(f"{NODE_ID}: Found a longer valid chain. Replacing our chain...")
@@ -136,7 +144,7 @@ class NodeCommunication:
         return False
 
 
-class NodeRequestHandler(BaseHTTPRequestHandler): # Renamed for clarity
+class NodeRequestHandler(BaseHTTPRequestHandler):
     def _set_headers(self, status_code=200):
         self.send_response(status_code)
         self.send_header('Content-type', 'application/json')
@@ -145,7 +153,12 @@ class NodeRequestHandler(BaseHTTPRequestHandler): # Renamed for clarity
     def do_GET(self):
         if self.path == '/status':
             self._set_headers()
-            response = {"message": f"{NODE_ID} is up and running!", "chain_length": len(node_blockchain.chain), "pending_tx_count": len(node_blockchain.pending_transactions)}
+            response = {
+                "message": f"{NODE_ID} is up and running!",
+                "chain_length": len(node_blockchain.chain),
+                "pending_tx_count": len(node_blockchain.pending_transactions),
+                "authorized_miners": list(node_blockchain.authorized_miners) # Show authorized miners
+            }
             self.wfile.write(json.dumps(response).encode('utf-8'))
         elif self.path == '/chain':
             self._set_headers()
@@ -156,17 +169,20 @@ class NodeRequestHandler(BaseHTTPRequestHandler): # Renamed for clarity
             response = {"pending_transactions": node_blockchain.get_pending_transactions_as_list()}
             self.wfile.write(json.dumps(response).encode('utf-8'))
         elif self.path == '/mine_block':
+            # Pass NODE_ID as the miner_address
+            if not node_blockchain.is_miner_authorized(NODE_ID):
+                self._set_headers(403) # Forbidden
+                self.wfile.write(json.dumps({"message": f"Node {NODE_ID} is not authorized to mine blocks."}).encode('utf-8'))
+                return
+
             if not node_blockchain.pending_transactions:
                 self._set_headers(400)
                 self.wfile.write(json.dumps({"message": "No pending transactions to mine."}).encode('utf-8'))
                 return
 
-            new_block = node_blockchain.create_block(NODE_ID)
+            new_block = node_blockchain.create_block(NODE_ID) # Pass NODE_ID here
             if new_block:
-                # IMPORTANT: This is where we broadcast the new block
-                # We need to add it to our own chain *first* (which create_block doesn't do)
-                # and then broadcast it. Let's make it a separate `propose_block` function.
-                if node_blockchain.add_block(new_block): # Add to self before broadcasting
+                if node_blockchain.add_block(new_block):
                     NodeCommunication.broadcast_block(new_block)
                     self._set_headers(200)
                     self.wfile.write(json.dumps({"message": "Block created and broadcast.", "block": new_block.to_dict()}).encode('utf-8'))
@@ -175,7 +191,52 @@ class NodeRequestHandler(BaseHTTPRequestHandler): # Renamed for clarity
                     self.wfile.write(json.dumps({"message": "Failed to add new block to local chain after creation (should not happen normally)."}).encode('utf-8'))
             else:
                 self._set_headers(500)
-                self.wfile.write(json.dumps({"message": "Failed to create block."}).encode('utf-8'))
+                self.wfile.write(json.dumps({"message": "Failed to create block (check logs for authorization/pending transactions)."}).encode('utf-8'))
+        elif self.path.startswith('/transaction/decrypt'):
+            # Example endpoint to demonstrate decryption for a specific transaction
+            # In a real app, this would be more complex and secure, likely client-side
+            query_params = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            block_index = query_params.get('block_index', [None])[0]
+            tx_hash = query_params.get('tx_hash', [None])[0]
+
+            if not block_index or not tx_hash:
+                self._set_headers(400)
+                self.wfile.write(json.dumps({"message": "Missing block_index or tx_hash"}).encode('utf-8'))
+                return
+
+            try:
+                block_index = int(block_index)
+                if block_index >= len(node_blockchain.chain) or block_index < 0:
+                    raise IndexError("Block index out of range")
+                
+                target_block = node_blockchain.chain[block_index]
+                found_tx = None
+                for tx in target_block.transactions:
+                    if tx.calculate_hash() == tx_hash:
+                        found_tx = tx
+                        break
+                
+                if found_tx and found_tx.is_encrypted:
+                    decrypted_data = simulate_decrypt(found_tx.data, NODE_ENCRYPTION_KEY)
+                    if decrypted_data is not None:
+                        self._set_headers(200)
+                        self.wfile.write(json.dumps({"message": "Decrypted data.", "data": decrypted_data, "original_encrypted_data": found_tx.data}).encode('utf-8'))
+                    else:
+                        self._set_headers(403) # Forbidden / Unauthorized to decrypt
+                        self.wfile.write(json.dumps({"message": "Could not decrypt transaction data (incorrect key or malformed).", "encrypted_data": found_tx.data}).encode('utf-8'))
+                elif found_tx and not found_tx.is_encrypted:
+                    self._set_headers(200)
+                    self.wfile.write(json.dumps({"message": "Transaction data is not encrypted.", "data": found_tx.data}).encode('utf-8'))
+                else:
+                    self._set_headers(404)
+                    self.wfile.write(json.dumps({"message": "Transaction not found in specified block."}).encode('utf-8'))
+
+            except (ValueError, IndexError) as e:
+                self._set_headers(400)
+                self.wfile.write(json.dumps({"message": f"Invalid block index or hash: {e}"}).encode('utf-8'))
+            except Exception as e:
+                self._set_headers(500)
+                self.wfile.write(json.dumps({"message": f"Server error during decryption: {e}"}).encode('utf-8'))
         else:
             self._set_headers(404)
             self.wfile.write(json.dumps({"message": "Not Found"}).encode('utf-8'))
@@ -187,47 +248,36 @@ class NodeRequestHandler(BaseHTTPRequestHandler): # Renamed for clarity
 
         if self.path == '/transactions/new':
             tx_data = data
-            tx = Transaction.from_dict(tx_data) # Use from_dict to reconstruct
+            tx = Transaction.from_dict(tx_data)
 
             if node_blockchain.add_transaction(tx):
                 self._set_headers(201)
                 self.wfile.write(json.dumps({"message": "Transaction added to pending pool."}).encode('utf-8'))
-                # IMPORTANT: Broadcast the new transaction to other nodes
-                # This ensures eventual consistency of pending pools
                 NodeCommunication.broadcast_transaction(tx)
             else:
                 self._set_headers(400)
                 self.wfile.write(json.dumps({"message": "Invalid transaction."}).encode('utf-8'))
 
         elif self.path == '/blocks/new':
-            # Receive a new block proposed by another node for validation
             block_data = data.get('block')
             if not block_data:
                 self._set_headers(400)
                 self.wfile.write(json.dumps({"message": "No block data provided."}).encode('utf-8'))
                 return
 
-            new_block = Block.from_dict(block_data) # Use from_dict to reconstruct
+            new_block = Block.from_dict(block_data)
 
-            # Attempt to add the block to this node's chain
-            # If the block is valid and extends our chain, add it.
-            # Otherwise, it might trigger a conflict resolution.
             if node_blockchain.add_block(new_block):
                 self._set_headers(200)
                 self.wfile.write(json.dumps({"message": "New block received and added."}).encode('utf-8'))
-                # After successfully adding a block, it's good practice to try to resolve
-                # conflicts in case another node has a longer chain that we just missed.
                 NodeCommunication.resolve_conflicts(node_blockchain, PEERS)
             else:
-                # If the block couldn't be added, it indicates a divergence or invalid block.
-                # Trigger conflict resolution to get the correct chain.
                 print(f"Block #{new_block.index} received but failed to add. Initiating conflict resolution.")
                 NodeCommunication.resolve_conflicts(node_blockchain, PEERS)
-                self._set_headers(400) # Or 409 Conflict
+                self._set_headers(400)
                 self.wfile.write(json.dumps({"message": "Invalid or conflicting block received. Attempting to resolve."}).encode('utf-8'))
 
         elif self.path == '/resolve_conflict':
-            # Endpoint to manually trigger chain synchronization/conflict resolution
             replaced = NodeCommunication.resolve_conflicts(node_blockchain, PEERS)
             if replaced:
                 self._set_headers(200)
@@ -237,7 +287,6 @@ class NodeRequestHandler(BaseHTTPRequestHandler): # Renamed for clarity
                 self.wfile.write(json.dumps({"message": "Our chain is authoritative."}).encode('utf-8'))
 
         elif self.path == '/policy/set':
-            # Endpoint for Board of Government to set policies (simplified)
             policy_name = data.get('name')
             policy_value = data.get('value')
             if policy_name is not None and policy_value is not None:
@@ -249,6 +298,16 @@ class NodeRequestHandler(BaseHTTPRequestHandler): # Renamed for clarity
             else:
                 self._set_headers(400)
                 self.wfile.write(json.dumps({"message": "Policy name and value required."}).encode('utf-8'))
+        
+        elif self.path == '/miner/add':
+            miner_id = data.get('miner_id')
+            if miner_id:
+                node_blockchain.add_authorized_miner(miner_id)
+                self._set_headers(200)
+                self.wfile.write(json.dumps({"message": f"Miner '{miner_id}' added to authorized list on this node."}).encode('utf-8'))
+            else:
+                self._set_headers(400)
+                self.wfile.write(json.dumps({"message": "Miner ID required."}).encode('utf-8'))
 
         else:
             self._set_headers(404)
@@ -264,11 +323,9 @@ def run_node_server():
 def background_synchronizer():
     """
     Periodically tries to resolve conflicts to keep the chain synchronized.
-    In a real system, this might be event-driven (e.g., after receiving a new block)
-    or more sophisticated.
     """
     while True:
-        time.sleep(30) # Check every 30 seconds
+        time.sleep(30)
         print(f"\n{NODE_ID}: Running background chain synchronization...")
         NodeCommunication.resolve_conflicts(node_blockchain, PEERS)
 
@@ -291,6 +348,7 @@ if __name__ == "__main__":
     print(f"{NODE_ID} running... (Ctrl+C to stop)")
     print(f"{NODE_ID} blockchain chain length: {len(node_blockchain.chain)}")
     print(f"{NODE_ID} current policies: {node_blockchain.policies}")
+    print(f"{NODE_ID} authorized miners: {node_blockchain.authorized_miners}")
 
     try:
         while True:

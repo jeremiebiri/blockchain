@@ -1,4 +1,4 @@
-# node2.py
+# node4.py
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import json
 import threading
@@ -9,40 +9,30 @@ import urllib.error
 from blockchain_core import Blockchain, Transaction, Block, simple_hash, simulate_encrypt, simulate_decrypt
 
 HOST_NAME = '0.0.0.0'
-NODE_PORT = 5002
-NODE_ID = "Hospital_2"
-NODE_PRIVATE_KEY = "Hospital_2_private_key"
-# Define a key for simulating encryption/decryption for this node's use
-NODE_ENCRYPTION_KEY = "Hospital_2_ENC_Key"
+NODE_PORT = 5004
+NODE_ID = "Hospital_4"
+NODE_PRIVATE_KEY = "Hospital_4_private_key"
+NODE_ENCRYPTION_KEY = "Hospital_4_ENC_Key"
 
+# All nodes should know about each other
 PEERS = [
-    {'id': 'Hospital_1', 'address': 'http://node1:5001'}
+    {'id': 'Hospital_1', 'address': 'http://node1:5001'},
+    {'id': 'Hospital_2', 'address': 'http://node2:5002'},
+    {'id': 'Hospital_3', 'address': 'http://node3:5003'}
 ]
 
-# Initialize the blockchain for this node
 node_blockchain = Blockchain()
-node_blockchain.register_organization(NODE_ID, NODE_ID) # Register itself
+node_blockchain.register_organization(NODE_ID, NODE_ID)
 
 # --- PoA: Define Authorized Miners ---
-# For this demo, both Hospital_1 and Hospital_2 are authorized miners.
-node_blockchain.add_authorized_miner(NODE_ID) # Authorize itself
+node_blockchain.add_authorized_miner(NODE_ID)
 for peer in PEERS:
     node_blockchain.add_authorized_miner(peer['id'])
 
 
-# CONCEPTUAL: Board of Government's special node
-# In node2, we don't set policies by default, but it will receive them.
-if NODE_ID == "Hospital_1": # This block will not execute for node2
-    node_blockchain.set_policy('restrict_sender_to_registered_orgs', True)
-    node_blockchain.set_policy('min_ventilator_duration_hrs', 1)
-
-
 class NodeCommunication:
-    """Helper class for inter-node communication."""
-
     @staticmethod
     def _send_post_request(url, payload):
-        """Helper to send a POST request with JSON payload."""
         data = json.dumps(payload).encode('utf-8')
         req = urllib.request.Request(url, data=data, headers={'Content-Type': 'application/json'})
         try:
@@ -55,7 +45,6 @@ class NodeCommunication:
 
     @staticmethod
     def broadcast_transaction(transaction):
-        """Broadcasts a transaction to all known peers."""
         print(f"\nBroadcasting transaction from {transaction.sender} to peers...")
         for peer in PEERS:
             try:
@@ -71,7 +60,6 @@ class NodeCommunication:
 
     @staticmethod
     def broadcast_block(block):
-        """Broadcasts a newly mined block to all known peers."""
         print(f"\nBroadcasting block #{block.index} to peers...")
         for peer in PEERS:
             try:
@@ -87,7 +75,6 @@ class NodeCommunication:
 
     @staticmethod
     def fetch_chain(peer_address):
-        """Fetches the full chain from a given peer."""
         try:
             with urllib.request.urlopen(f"{peer_address}/chain", timeout=5) as response:
                 return json.loads(response.read().decode('utf-8'))
@@ -100,11 +87,6 @@ class NodeCommunication:
 
     @staticmethod
     def resolve_conflicts(current_blockchain, peers):
-        """
-        Consensus algorithm: Our simplified version for consortium.
-        If a longer valid chain exists, replace ours.
-        This is a basic longest-chain rule, now incorporating PoA validation.
-        """
         longest_chain_data = None
         max_length = len(current_blockchain.chain)
 
@@ -116,11 +98,8 @@ class NodeCommunication:
             if chain_response and 'chain' in chain_response and chain_response['length'] > max_length:
                 print(f"  {peer['id']} has a longer chain (length {chain_response['length']}). Validating...")
                 
-                # Temporarily create a dummy blockchain to validate the candidate chain
                 temp_blockchain_for_validation = Blockchain()
-                temp_blockchain_for_validation.chain = [] # Clear its genesis block
-
-                # IMPORTANT: Transfer authorized_miners for validation consistency
+                temp_blockchain_for_validation.chain = []
                 temp_blockchain_for_validation.authorized_miners = set(current_blockchain.authorized_miners)
                 
                 if temp_blockchain_for_validation.replace_chain(chain_response['chain']):
@@ -163,9 +142,8 @@ class NodeRequestHandler(BaseHTTPRequestHandler):
             response = {"pending_transactions": node_blockchain.get_pending_transactions_as_list()}
             self.wfile.write(json.dumps(response).encode('utf-8'))
         elif self.path == '/mine_block':
-            # Pass NODE_ID as the miner_address
             if not node_blockchain.is_miner_authorized(NODE_ID):
-                self._set_headers(403) # Forbidden
+                self._set_headers(403)
                 self.wfile.write(json.dumps({"message": f"Node {NODE_ID} is not authorized to mine blocks."}).encode('utf-8'))
                 return
 
@@ -174,7 +152,7 @@ class NodeRequestHandler(BaseHTTPRequestHandler):
                 self.wfile.write(json.dumps({"message": "No pending transactions to mine."}).encode('utf-8'))
                 return
 
-            new_block = node_blockchain.create_block(NODE_ID) # Pass NODE_ID here
+            new_block = node_blockchain.create_block(NODE_ID)
             if new_block:
                 if node_blockchain.add_block(new_block):
                     NodeCommunication.broadcast_block(new_block)
@@ -282,8 +260,6 @@ class NodeRequestHandler(BaseHTTPRequestHandler):
             policy_name = data.get('name')
             policy_value = data.get('value')
             if policy_name is not None and policy_value is not None:
-                # For this simple demo, any node can set a policy.
-                # In real scenario, this would be restricted to authorized BOG nodes.
                 node_blockchain.set_policy(policy_name, policy_value)
                 self._set_headers(200)
                 self.wfile.write(json.dumps({"message": f"Policy '{policy_name}' set."}).encode('utf-8'))
@@ -323,16 +299,13 @@ def background_synchronizer():
 
 
 if __name__ == "__main__":
-    # Register other organizations for potential future validation/permissioning
     for peer in PEERS:
         node_blockchain.register_organization(peer['id'], peer['id'])
 
-    # Start the HTTP server in a separate thread
     server_thread = threading.Thread(target=run_node_server)
     server_thread.daemon = True
     server_thread.start()
 
-    # Start the background synchronizer thread
     sync_thread = threading.Thread(target=background_synchronizer)
     sync_thread.daemon = True
     sync_thread.start()
@@ -344,6 +317,6 @@ if __name__ == "__main__":
 
     try:
         while True:
-            time.sleep(1) # Keep main thread alive
+            time.sleep(1)
     except KeyboardInterrupt:
         print(f"\n{NODE_ID} shutting down.")

@@ -18,8 +18,35 @@ services:
     networks:
       - consortium_network
     depends_on:
-      - node1 # Ensures node1 starts before node2, though not strictly necessary for this simple ping
+      - node1
+
+  node3: # New service for Hospital_3
+    build: .
+    command: python node3.py
+    ports:
+      - "5003:5003"
+    networks:
+      - consortium_network
+    depends_on:
+      - node1 # Ensure node1 starts first for initial peer discovery
+      - node2
+
+  node4: # New service for Hospital_4
+    build: .
+    command: python node4.py
+    ports:
+      - "5004:5004"
+    networks:
+      - consortium_network
+    depends_on:
+      - node1
+      - node2
+      - node3
 
 networks:
   consortium_network:
     driver: bridge
+# This docker-compose file sets up a consortium of four nodes (hospitals) in a blockchain network.
+# Each node runs a separate Python script and communicates over a shared network.
+# The nodes are configured to start in a specific order to ensure proper peer discovery.
+# The ports are mapped to the host machine for external access.
