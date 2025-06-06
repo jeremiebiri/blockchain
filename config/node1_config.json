@@ -1,0 +1,12 @@
+{
+  "HOST_NAME": "0.0.0.0",
+  "NODE_PORT": 5001,
+  "NODE_ID": "Hospital_1",
+  "NODE_ENCRYPTION_KEY": "Hospital_1_ENC_Key",
+  "PEERS": [
+    { "id": "Hospital_2", "address": "http://node2:5002" },
+    { "id": "Hospital_3", "address": "http://node3:5003" },
+    { "id": "Hospital_4", "address": "http://node4:5004" }
+  ],
+  "POLICY_FILE_PATH": "initial_policies.json"
+}

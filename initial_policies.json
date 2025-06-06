@@ -1,0 +1,5 @@
+{
+  "restrict_sender_to_registered_orgs": true,
+  "min_ventilator_duration_hrs": 1,
+  "authorized_policy_proposers": ["Hospital_1"]
+}
